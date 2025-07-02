@@ -53,6 +53,7 @@ def enable_prefill_spec(
     init_spec_config()
 
     print("Applying speculative prefill vllm monkey patch...")
+    breakpoint()
     patch_executor()
     patch_scheduler()
     patch_data()

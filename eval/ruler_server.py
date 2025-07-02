@@ -24,10 +24,16 @@ from speculative_prefill import enable_prefill_spec
 spec_model = os.environ.get(
     "ENABLE_SP", None)
 
+spec_config_path = os.environ.get(
+    "SPEC_CONFIG_PATH", None)
+
+print(f"spec_model: {spec_model}")
+print(f"spec_config_path: {spec_config_path}")
+
 if spec_model:
     enable_prefill_spec(
         spec_model=spec_model, 
-        spec_config_path='./configs/config.yaml'
+        spec_config_path=spec_config_path
     )
 
 import uvicorn
