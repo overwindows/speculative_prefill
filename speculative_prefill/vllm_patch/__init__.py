@@ -53,7 +53,8 @@ def enable_prefill_spec(
     init_spec_config()
 
     print("Applying speculative prefill vllm monkey patch...")
-    breakpoint()
+    # breakpoint()
+    # assert False, "This is a temporary patch for vllm, please use the official vllm patch instead."
     patch_executor()
     patch_scheduler()
     patch_data()

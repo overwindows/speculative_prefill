@@ -133,7 +133,7 @@ if __name__ == "__main__":
 
     model = LLM(
         model_name, 
-        tokenizer='/nvmedata/hf_checkpoints/Meta-Llama-3.1-8B-Instruct/', 
+        tokenizer='/nvmedata/hf_checkpoints/Meta-Llama-3.1-8B-Instruct/',
         gpu_memory_utilization=args.gpu_memory_utilization, 
         tensor_parallel_size=args.tensor_parallel_size,
         max_model_len=65536, # this will include all examples in long bench
