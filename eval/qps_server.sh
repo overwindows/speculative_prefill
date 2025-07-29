@@ -6,7 +6,7 @@ export ENABLE_SP=/nvmedata/hf_checkpoints/Llama-3.2-1B-Instruct
 
 SIZE=${1:-"70B"}
 # API_KEY=${2:-local_server}
-PORT=${3:-8888}
+PORT=${3:-8000}
 
 if [ $SIZE == "70B" ]; then
     MODEL_NAME=/nvmedata/hf_checkpoints/Llama-3.3-70B-Instruct
@@ -24,6 +24,9 @@ echo "Starting vllm server using port ${PORT}"
 fuser -n tcp ${PORT}
 
 echo ${PORT}
+
+# vllm serve /nvmedata/hf_checkpoints/Llama-3.3-70B-Instruct --tensor-parallel-size 4 --gpu-memory-utilization 0.95 --max_model_len 131072
+
 
 python3 -m speculative_prefill.scripts serve \
     ${MODEL_NAME} \
