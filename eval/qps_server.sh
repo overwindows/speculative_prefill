@@ -25,19 +25,19 @@ fuser -n tcp ${PORT}
 
 echo ${PORT}
 
-# vllm serve /nvmedata/hf_checkpoints/Llama-3.3-70B-Instruct --tensor-parallel-size 4 --gpu-memory-utilization 0.95 --max_model_len 131072
+vllm serve /nvmedata/hf_checkpoints/Qwen3-32B --tensor-parallel-size 4 --gpu-memory-utilization 0.95 --max_model_len 131072
 
 
-python3 -m speculative_prefill.scripts serve \
-    ${MODEL_NAME} \
-    --tokenizer /nvmedata/hf_checkpoints/Meta-Llama-3.1-8B-Instruct \
-    --dtype auto \
-    --max-model-len 131072 \
-    --gpu-memory-utilization 0.95 \
-    --enable-chunked-prefill=False \
-    --tensor-parallel-size 4 \
-    --max-num-seqs 64 \
-    --port=$PORT
+# python3 -m speculative_prefill.scripts serve \
+#     ${MODEL_NAME} \
+#     --tokenizer /nvmedata/hf_checkpoints/Meta-Llama-3.1-8B-Instruct \
+#     --dtype auto \
+#     --max-model-len 131072 \
+#     --gpu-memory-utilization 0.95 \
+#     --enable-chunked-prefill=False \
+#     --tensor-parallel-size 4 \
+#     --max-num-seqs 64 \
+#     --port=$PORT
 
 # --enforce-eager \
 # --api-key=$API_KEY \
