@@ -10,9 +10,23 @@ from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
                                                tensor_model_parallel_gather)
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.models.llama import (LlamaAttention,
-                                              LlamaDecoderLayer,
-                                              LlamaForCausalLM)
+try:  # Optional: llama classes (kept for type hints / backward compat)
+    from vllm.model_executor.models.llama import (  # type: ignore
+        LlamaAttention,  # noqa: F401
+        LlamaDecoderLayer,  # noqa: F401
+        LlamaForCausalLM,  # noqa: F401
+    )
+except Exception:  # pragma: no cover - absence is fine
+    LlamaAttention = LlamaDecoderLayer = LlamaForCausalLM = None  # type: ignore
+
+try:  # Optional: qwen (qwen2/qwen3) classes
+    from vllm.model_executor.models.qwen import (  # type: ignore
+        QwenAttention,  # noqa: F401
+        QwenDecoderLayer,  # noqa: F401
+        QwenForCausalLM,  # noqa: F401
+    )
+except Exception:  # pragma: no cover
+    QwenAttention = QwenDecoderLayer = QwenForCausalLM = None  # type: ignore
 from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.worker.worker import Worker
 
@@ -21,33 +35,79 @@ from speculative_prefill.vllm_patch.data.sequence import AugmentedSequenceData
 
 
 def _forward_with_query_dump(
-    self: LlamaAttention,
+    self,  # model-specific attention module (llama / qwen / etc.)
     positions: torch.Tensor,
     hidden_states: torch.Tensor,
     kv_cache: torch.Tensor,
-    attn_metadata: AttentionMetadata, 
-    query_buffer: List[List[torch.Tensor]], 
-    layer_idx: int
+    attn_metadata: AttentionMetadata,
+    query_buffer: List[List[torch.Tensor]],
+    layer_idx: int,
 ) -> torch.Tensor:
-    qkv, _ = self.qkv_proj(hidden_states)
-    q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-    q, k = self.rotary_emb(positions, q, k)
+    """Patched attention forward capturing query tensors.
 
+    Designed to work for Llama-style (fused qkv_proj) and Qwen-style (either
+    fused qkv_proj or separate q_proj/k_proj/v_proj) attention modules.
+    """
+    # 1. Obtain q, k, v projections
+    if hasattr(self, "qkv_proj"):
+        # Llama (and many others in vLLM) fused path
+        qkv, _ = self.qkv_proj(hidden_states)
+        # Attribute names: q_size / kv_size are present in llama; fall back if absent
+        q_size = getattr(self, "q_size", None)
+        kv_size = getattr(self, "kv_size", None)
+        if q_size is None or kv_size is None:
+            # Derive assuming head counts exist
+            num_q_heads = getattr(self, "num_heads", None) or getattr(self, "num_attention_heads", None)
+            num_kv_heads = getattr(self, "num_kv_heads", None) or getattr(self, "num_key_value_heads", None) or num_q_heads
+            head_dim = getattr(self, "head_size", None) or getattr(self, "head_dim", None)
+            if num_q_heads and head_dim:
+                q_size = num_q_heads * head_dim
+            if num_kv_heads and head_dim:
+                kv_size = num_kv_heads * head_dim
+        if q_size is None or kv_size is None:
+            raise RuntimeError("Unable to infer q_size/kv_size for fused qkv projection.")
+        q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+    else:
+        # Separate projections (possible in some Qwen variants)
+        if not all(hasattr(self, attr) for attr in ["q_proj", "k_proj", "v_proj"]):
+            raise RuntimeError("Attention module missing both fused qkv_proj and separate q/k/v projections.")
+        q, _ = self.q_proj(hidden_states)
+        k, _ = self.k_proj(hidden_states)
+        v, _ = self.v_proj(hidden_states)
+
+    # 2. Rotary embeddings (if provided)
+    if hasattr(self, "rotary_emb"):
+        q, k = self.rotary_emb(positions, q, k)
+    elif hasattr(self, "apply_rotary_pos_emb"):
+        # Some implementations use a different helper
+        q, k = self.apply_rotary_pos_emb(q, k, positions)
+
+    # 3. Store query (capture last token for prefill, else full) -- mirror llama logic
     if attn_metadata.num_prefills > 0:
-        query_buffer[layer_idx].append(
-            q[attn_metadata.seq_lens_tensor - 1, :])
+        query_buffer[layer_idx].append(q[attn_metadata.seq_lens_tensor - 1, :])
     else:
         query_buffer[layer_idx].append(q)
 
+    # 4. Attention compute & output projection (interfaces assumed consistent)
     attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-    output, _ = self.o_proj(attn_output)
+    if hasattr(self, "o_proj"):
+        output, _ = self.o_proj(attn_output)
+    else:
+        # Fallback: some modules may return already projected output
+        output = attn_output
     return output
 
 
 class LookAheadSpecWorker(Worker):
     def load_model(self):
         super().load_model()
-        assert isinstance(self.model_runner.model, LlamaForCausalLM)
+        # Support llama & qwen families (and potentially others) by duck-typing.
+        model_cls_name = self.model_runner.model.__class__.__name__
+        supported_markers = ["Llama", "Qwen"]
+        if not any(marker in model_cls_name for marker in supported_markers):
+            raise NotImplementedError(
+                f"LookAheadSpecWorker currently supports models containing any of {supported_markers} in class name; got {model_cls_name}."
+            )
         
         self.spec_config = get_spec_config()
 
@@ -55,27 +115,35 @@ class LookAheadSpecWorker(Worker):
 
         # do patching here to allow model output attention
         for layer_idx, layer in enumerate(self.model_runner.model.model.layers):
-            assert isinstance(layer, LlamaDecoderLayer)
+            # Accept decoder layers with a self_attn attribute
+            if not hasattr(layer, "self_attn"):
+                raise RuntimeError(
+                    f"Layer {layer_idx} missing self_attn; unsupported architecture for look-ahead spec patching."
+                )
             layer.self_attn.forward = MethodType(
                 partial(
-                    _forward_with_query_dump, 
-                    query_buffer=self.query_buffer, 
-                    layer_idx=layer_idx), 
-                layer.self_attn)
+                    _forward_with_query_dump,
+                    query_buffer=self.query_buffer,
+                    layer_idx=layer_idx,
+                ),
+                layer.self_attn,
+            )
             
+        cfg = self.model_runner.model.config
+        # Fallback attribute names used across model families
+        num_heads = getattr(cfg, "num_attention_heads", None) or getattr(cfg, "n_head", None)
+        num_kv_heads = getattr(cfg, "num_key_value_heads", None) or getattr(cfg, "num_kv_heads", None) or num_heads
+        head_dim = getattr(cfg, "head_dim", None) or getattr(cfg, "hidden_size", None) // num_heads if num_heads and getattr(cfg, "hidden_size", None) else None
+        if not all([num_heads, num_kv_heads, head_dim]):
+            raise RuntimeError("Could not infer (num_heads, num_kv_heads, head_dim) for model config.")
+
         self._reshape_key = partial(
-            torch.repeat_interleave, 
-            dim=1, 
-            repeats=(
-                self.model_runner.model.config.num_attention_heads //
-                self.model_runner.model.config.num_key_value_heads
-            ))
-        
-        self._reshape_query = lambda x: x.reshape(
-            -1, 
-            self.model_runner.model.config.num_attention_heads, 
-            self.model_runner.model.config.head_dim
+            torch.repeat_interleave,
+            dim=1,
+            repeats=(num_heads // num_kv_heads),
         )
+
+        self._reshape_query = lambda x: x.reshape(-1, num_heads, head_dim)
 
     def _prepare_query_buffer(self):
         if not hasattr(self, "query_buffer"):
