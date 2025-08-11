@@ -25,8 +25,15 @@ fuser -n tcp ${PORT}
 
 echo ${PORT}
 
-vllm serve /nvmedata/hf_checkpoints/Qwen3-32B --tensor-parallel-size 4 --gpu-memory-utilization 0.95 --max_model_len 131072
+# vllm serve /nvmedata/hf_checkpoints/Meta-Llama-3.1-8B-Instruct --tensor-parallel-size 4 --gpu-memory-utilization 0.95 --max_model_len 131072
 
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1     # only needed if vLLM complains about max_model_len
+vllm serve Qwen/Qwen3-32B \
+  --tensor-parallel-size 4 --gpu-memory-utilization 0.95 \
+  --max-model-len 131072 \
+  --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes
 
 # python3 -m speculative_prefill.scripts serve \
 #     ${MODEL_NAME} \
