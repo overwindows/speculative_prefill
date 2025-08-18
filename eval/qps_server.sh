@@ -33,7 +33,8 @@ vllm serve Qwen/Qwen3-32B \
   --max-model-len 131072 \
   --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' \
   --enable-auto-tool-choice \
-  --tool-call-parser hermes
+  --tool-call-parser hermes \
+  --enable-restful-api
 
 # python3 -m speculative_prefill.scripts serve \
 #     ${MODEL_NAME} \
