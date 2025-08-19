@@ -54,7 +54,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecPrefillWorker":
         seed=model_config.seed,
         revision=model_config.revision,
         code_revision=model_config.code_revision,
-        rope_scaling=model_config.rope_scaling,
+        # rope_scaling=model_config.rope_scaling, # TODO: deal with this later in a proper way
         rope_theta=model_config.rope_theta,
         tokenizer_revision=model_config.tokenizer_revision,
         max_model_len=model_config.max_model_len,
