@@ -17,7 +17,8 @@ class SpecConfig:
     @classmethod
     def from_path(cls, config_path: Optional[str] = None):
         if config_path is None:
-            return cls()
+            # Return default config when no path provided
+            return cls(keep_strategy="percentage", keep_kwargs={"percentage": 0.5})
 
         with open(config_path, 'r') as f:
             data = yaml.safe_load(f)

@@ -1,11 +1,13 @@
+from cgi import print_directory
 import math
 from copy import deepcopy
 from functools import partial
 from types import MethodType
 from typing import List, Optional, Tuple, Union
 
+from speculative_prefill.vllm_patch.scheduler import logger
 import torch
-from vllm.attention import AttentionMetadata
+# from vllm.attention import AttentionMetadata  # Unused import
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.distributed.communication_op import (broadcast_tensor_dict,
                                                tensor_model_parallel_gather)
@@ -38,17 +40,15 @@ def _forward_with_query_dump(
     self,  # model-specific attention module (llama / qwen / etc.)
     positions: torch.Tensor,
     hidden_states: torch.Tensor,
-    kv_cache: torch.Tensor,
-    attn_metadata: AttentionMetadata,
     query_buffer: List[List[torch.Tensor]],
     layer_idx: int,
 ) -> torch.Tensor:
     """Patched attention forward capturing query tensors.
 
-    Designed to work for Llama-style (fused qkv_proj) and Qwen-style (either
-    fused qkv_proj or separate q_proj/k_proj/v_proj) attention modules.
+    Updated for vLLM 0.10.1.1 where the attention forward signature is simplified.
+    We capture the query tensors before calling the original attention forward.
     """
-    # 1. Obtain q, k, v projections
+    # 1. Obtain q, k, v projections for query capture
     if hasattr(self, "qkv_proj"):
         # Llama (and many others in vLLM) fused path
         qkv, _ = self.qkv_proj(hidden_states)
@@ -81,26 +81,31 @@ def _forward_with_query_dump(
     elif hasattr(self, "apply_rotary_pos_emb"):
         # Some implementations use a different helper
         q, k = self.apply_rotary_pos_emb(q, k, positions)
-
-    # 3. Store query (capture last token for prefill, else full) -- mirror llama logic
-    if attn_metadata.num_prefills > 0:
-        query_buffer[layer_idx].append(q[attn_metadata.seq_lens_tensor - 1, :])
+    # 3. Store query for speculative prefill (simplified for vLLM 0.10.1.1)
+    # For prefill stage (iteration 0): only store the last token's query
+    # For decode stages (iteration > 0): store all queries  
+    # Prefill stage: extract and store only the last token's query
+    # In prefill, q contains queries for all tokens in the sequence
+    # We only want the query for the last token (which will generate subsequent tokens)
+    print(q.shape, layer_idx)
+    if q.shape[0] > 1:
+        # Take the last token along the sequence dimension
+        last_token_query = q[-1:] if q.shape[0] > 1 else q
+        query_buffer[layer_idx].append(last_token_query)
     else:
+        # Fallback: if tensor structure is unexpected, store as-is
         query_buffer[layer_idx].append(q)
-
-    # 4. Attention compute & output projection (interfaces assumed consistent)
-    attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-    if hasattr(self, "o_proj"):
-        output, _ = self.o_proj(attn_output)
-    else:
-        # Fallback: some modules may return already projected output
-        output = attn_output
+    # 4. Call the original attention forward method
+    # In vLLM 0.10.1.1, we delegate to the original implementation
+    attn_output = self.attn(q, k, v)
+    output, _ = self.o_proj(attn_output)
     return output
 
 
 class LookAheadSpecWorker(Worker):
     def load_model(self):
         super().load_model()
+        logger.info("Loading model for look-ahead spec worker")
         # Support llama & qwen families (and potentially others) by duck-typing.
         model_cls_name = self.model_runner.model.__class__.__name__
         supported_markers = ["Llama", "Qwen"]
@@ -110,6 +115,7 @@ class LookAheadSpecWorker(Worker):
             )
         
         self.spec_config = get_spec_config()
+        self.current_iteration = 0  # Track current speculation iteration
 
         self._prepare_query_buffer()
 
@@ -120,6 +126,7 @@ class LookAheadSpecWorker(Worker):
                 raise RuntimeError(
                     f"Layer {layer_idx} missing self_attn; unsupported architecture for look-ahead spec patching."
                 )
+            # Store the original forward method before patching
             layer.self_attn.forward = MethodType(
                 partial(
                     _forward_with_query_dump,
@@ -183,10 +190,14 @@ class LookAheadSpecWorker(Worker):
             request = None
 
         self._prepare_query_buffer()
+        # Reset iteration counter at the start of speculation
+        self.current_iteration = 0
 
         model_outputs: List[SamplerOutput] = []
-
         for itr in range(look_ahead_cnt):
+            # Update current iteration for query storage filtering
+            self.current_iteration = itr
+            
             if itr == 0:
                 prefill_slot_mapping = self._get_prefill_slot_mapping(request)
 
@@ -197,7 +208,7 @@ class LookAheadSpecWorker(Worker):
             
             if is_driver:
                 model_output = model_output[0]
-
+                print(itr, model_output)
                 self._append_new_tokens(
                     model_output, 
                     request.seq_group_metadata_list, 
