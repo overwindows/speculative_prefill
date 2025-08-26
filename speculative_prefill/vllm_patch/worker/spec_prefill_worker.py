@@ -40,35 +40,35 @@ def create_spec_worker(*args, **kwargs) -> "SpecPrefillWorker":
 
     # In vLLM 0.10.1.1, configs are passed via vllm_config
     vllm_config = kwargs["vllm_config"]
-    
+
     # Log tensor parallelism configuration
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     rank = vllm_config.parallel_config.rank
     logger.info(f"SpecPrefillWorker: TP size={tp_size}, rank={rank}")
     logger.info(f"Base model: {vllm_config.model_config.model}")
     logger.info(f"Spec model: {spec_model_name}")
-    
+
     assert vllm_config.scheduler_config.chunked_prefill_enabled == False, \
         "Please set --enable-chunked-prefill=False or enable_chunked_prefill=False. "
 
-    # create the base model  
+    # create the base model
     # Don't override model_runner_cls - let vLLM use its default
     # kwargs["model_runner_cls"] = ModelRunner
     model_config: ModelConfig = vllm_config.model_config
-    base_model_worker = Worker(*args, **kwargs) 
+    base_model_worker = Worker(*args, **kwargs)
 
     # create the spec prefill model
     # TODO: deal with this later in a proper way``
     spec_kwargs = kwargs.copy()
-    
+
     # Create a new vllm_config for the spec model with the spec model path
     from vllm.config import VllmConfig
     import copy
     spec_vllm_config = copy.deepcopy(vllm_config)
-    
+
     # Update the model path in the spec config
     spec_model_config = ModelConfig(
-        model=spec_model_name, 
+        model=spec_model_name,
         tokenizer=model_config.tokenizer,
         tokenizer_mode=model_config.tokenizer_mode,
         trust_remote_code=model_config.trust_remote_code,
@@ -76,7 +76,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecPrefillWorker":
         seed=model_config.seed,
         revision=model_config.revision,
         code_revision=model_config.code_revision,
-        # rope_scaling=model_config.rope_scaling, # TODO: deal with this later in a proper way
+        rope_scaling=model_config.rope_scaling,
         rope_theta=model_config.rope_theta,
         tokenizer_revision=model_config.tokenizer_revision,
         max_model_len=model_config.max_model_len,
@@ -92,21 +92,21 @@ def create_spec_worker(*args, **kwargs) -> "SpecPrefillWorker":
         use_async_output_proc=model_config.use_async_output_proc,
         override_neuron_config=model_config.override_neuron_config
     )
-    
+
     # Update the spec vllm_config with the new model config
     spec_vllm_config.model_config = spec_model_config
-    
+
     # Optimize spec model tensor parallelism
     # For small spec models (like 1B), TP=1 might be more efficient
     # But keep the same TP for now to ensure compatibility
     # TODO: Consider optimizing TP degree based on model size
     # if spec_model is small enough:
     #     spec_vllm_config.parallel_config.tensor_parallel_size = 1
-    
+
     spec_kwargs["vllm_config"] = spec_vllm_config
     spec_model_worker = LookAheadSpecWorker(*args, **spec_kwargs)
     return SpecPrefillWorker(
-        base_model_worker=base_model_worker, 
+        base_model_worker=base_model_worker,
         spec_model_worker=spec_model_worker
     )
 
@@ -114,8 +114,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecPrefillWorker":
 class SpecPrefillWorker(LoRANotSupportedWorkerBase):
     def __init__(
         self,
-        base_model_worker: Worker, 
-        spec_model_worker: LookAheadSpecWorker, 
+        base_model_worker: Worker,
+        spec_model_worker: LookAheadSpecWorker,
     ):
         self.base_model_worker = base_model_worker
         self.spec_model_worker = spec_model_worker
@@ -123,9 +123,9 @@ class SpecPrefillWorker(LoRANotSupportedWorkerBase):
 
         self.base_model_worker.model_runner._builder_cls = \
             AugmentedModelInputForGPUBuilder
-        
-        self.id_to_context_len: Dict[str, int] = {}      
-    
+
+        self.id_to_context_len: Dict[str, int] = {}
+
     def init_device(self) -> None:
         # The base worker model is initialized first in case the spec
         # model has a smaller TP degree than the base worker.
@@ -148,11 +148,11 @@ class SpecPrefillWorker(LoRANotSupportedWorkerBase):
             self.spec_model_worker.get_cache_block_size_bytes())
 
         new_num_gpu_blocks = split_num_cache_blocks_evenly(
-            base_model_cache_block_size_bytes, 
-            spec_model_cache_block_size_bytes, 
+            base_model_cache_block_size_bytes,
+            spec_model_cache_block_size_bytes,
             num_gpu_blocks
         )
-        
+
         return new_num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(
@@ -165,30 +165,32 @@ class SpecPrefillWorker(LoRANotSupportedWorkerBase):
         self.spec_model_worker.initialize_cache(
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks)
-    
+
     @torch.inference_mode
     def execute_model(
-        self, 
+        self,
         execute_model_req: ExecuteModelRequest | None = None
     ) -> List[SamplerOutput] | None:
         if self.rank != self._driver_rank:
             self._run_non_driver_rank()
             return []
-        
+
         if execute_model_req is None:
             # we finished all things
             broadcast_tensor_dict({}, src=self._driver_rank)
             return []
 
-        has_prefill = any([sgm.is_prompt for sgm in execute_model_req.seq_group_metadata_list])
+        has_prefill = any(
+            [sgm.is_prompt for sgm in execute_model_req.seq_group_metadata_list])
 
         broadcast_tensor_dict({
             "has_prefill": has_prefill
         }, src=self._driver_rank)
 
         if has_prefill:
-            execute_model_req = self.spec_model_worker.speculate(execute_model_req)
-        
+            execute_model_req = self.spec_model_worker.speculate(
+                execute_model_req)
+
         execute_model_req = self._record_and_update_requests(execute_model_req)
 
         return self.base_model_worker.execute_model(execute_model_req)
@@ -214,7 +216,7 @@ class SpecPrefillWorker(LoRANotSupportedWorkerBase):
         return True
 
     def _record_and_update_requests(
-        self, 
+        self,
         execute_model_req: ExecuteModelRequest
     ) -> ExecuteModelRequest:
         for metadata in execute_model_req.seq_group_metadata_list:
@@ -224,7 +226,7 @@ class SpecPrefillWorker(LoRANotSupportedWorkerBase):
             id = f"{request_id}_{seq_id}"
             seq_data: AugmentedSequenceData = metadata.seq_data[seq_id]
 
-            if metadata.is_prompt:    
+            if metadata.is_prompt:
                 self.id_to_context_len[id] = seq_data.get_prompt_len()
             else:
                 seq_data._context_len = self.id_to_context_len[id]

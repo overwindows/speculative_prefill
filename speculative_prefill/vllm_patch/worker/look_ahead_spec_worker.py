@@ -52,25 +52,7 @@ def _forward_with_query_dump(
     if hasattr(self, "qkv_proj"):
         # Llama (and many others in vLLM) fused path
         qkv, _ = self.qkv_proj(hidden_states)
-        # Attribute names: q_size / kv_size are present in llama; fall back if absent
-        q_size = getattr(self, "q_size", None)
-        kv_size = getattr(self, "kv_size", None)
-        if q_size is None or kv_size is None:
-            # Derive assuming head counts exist
-            num_q_heads = getattr(self, "num_heads", None) or getattr(
-                self, "num_attention_heads", None)
-            num_kv_heads = getattr(self, "num_kv_heads", None) or getattr(
-                self, "num_key_value_heads", None) or num_q_heads
-            head_dim = getattr(self, "head_size", None) or getattr(
-                self, "head_dim", None)
-            if num_q_heads and head_dim:
-                q_size = num_q_heads * head_dim
-            if num_kv_heads and head_dim:
-                kv_size = num_kv_heads * head_dim
-        if q_size is None or kv_size is None:
-            raise RuntimeError(
-                "Unable to infer q_size/kv_size for fused qkv projection.")
-        q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+        q, k, _ = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
     else:
         # Separate projections (possible in some Qwen variants)
         if not all(hasattr(self, attr) for attr in ["q_proj", "k_proj", "v_proj"]):
@@ -78,7 +60,6 @@ def _forward_with_query_dump(
                 "Attention module missing both fused qkv_proj and separate q/k/v projections.")
         q, _ = self.q_proj(hidden_states)
         k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
 
     # 2. Rotary embeddings (if provided)
     if hasattr(self, "rotary_emb"):
@@ -103,9 +84,7 @@ def _forward_with_query_dump(
         # print(layer_idx, query_buffer[layer_idx][-1].shape)
     # 4. Call the original attention forward method
     # In vLLM 0.10.1.1, we delegate to the original implementation
-    attn_output = self.attn(q, k, v)
-    output, _ = self.o_proj(attn_output)
-    return output
+    return self._original_forward(positions, hidden_states)
 
 
 class LookAheadSpecWorker(Worker):
@@ -133,6 +112,7 @@ class LookAheadSpecWorker(Worker):
                     f"Layer {layer_idx} missing self_attn; unsupported architecture for look-ahead spec patching."
                 )
             # Store the original forward method before patching
+            layer.self_attn._original_forward = layer.self_attn.forward
             layer.self_attn.forward = MethodType(
                 partial(
                     _forward_with_query_dump,
@@ -219,6 +199,7 @@ class LookAheadSpecWorker(Worker):
             if is_driver:
                 model_output = model_output[0]
                 print(itr, model_output)
+                # Print the model output and decode it
                 self._append_new_tokens(
                     model_output,
                     request.seq_group_metadata_list,

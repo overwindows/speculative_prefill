@@ -3,8 +3,8 @@
 # export SPEC_CONFIG_PATH=../configs/config_p3_full_lah8.yaml
 # export SPEC_CONFIG_PATH=../configs/config_p1_full.yaml
 # export SPEC_CONFIG_PATH=../configs/config_p3_full.yaml
-export SPEC_CONFIG_PATH=../configs/config_p5_full.yaml
-# export SPEC_CONFIG_PATH=../configs/config_p5_full_lah8.yaml
+# export SPEC_CONFIG_PATH=../configs/config_p5_full.yaml
+export SPEC_CONFIG_PATH=../configs/config_p5_full_lah8.yaml
 # export SPEC_CONFIG_PATH=../configs/config_p7_full.yaml
 # export SPEC_CONFIG_PATH=../configs/config_p7_full_lah8.yaml
 # export SPEC_CONFIG_PATH=../configs/config_p9_full.yaml
